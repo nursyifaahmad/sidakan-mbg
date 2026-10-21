@@ -1,0 +1,24 @@
+# ==============================================================================
+# GITIGNORE - SIDAKAN ESP32 FIRMWARE
+# ==============================================================================
+
+# Build artifacts & compilation cache
+build/
+*.bin
+*.elf
+*.o
+*.d
+*.map
+*.hex
+
+# Backup & temporary files
+*.bak
+*.tmp
+*.log
+
+# Editor & IDE local files
+.theia/
+.vscode/
+.idea/
+*.swp
+*~
