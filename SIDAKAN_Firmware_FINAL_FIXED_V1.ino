@@ -980,6 +980,13 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     toggleSystemPower("Web Dashboard");
   } else if (length == 9 && memcmp(payload, "CALIBRATE", 9) == 0 && systemPowerState) {
     runDualGasCalibration();
+  } else if (length == 10 && memcmp(payload, "START_TEST", 10) == 0) {
+    startSampleTest();
+  } else if (length == 9 && memcmp(payload, "STOP_TEST", 9) == 0) {
+    stopSampleTest("Dibatalkan pengguna");
+  } else if (length == 11 && memcmp(payload, "CLEAR_READY", 11) == 0) {
+    sampleTestDone = false;
+    broadcastSensorData();
   }
 }
 
