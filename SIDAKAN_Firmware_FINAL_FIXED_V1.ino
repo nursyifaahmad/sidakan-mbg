@@ -1729,7 +1729,7 @@ void updateActuators(SystemStatus status, unsigned long currentMillis) {
   // Aturan Alarm Buzzer:
   // 1. Buzzer HANYA boleh berbunyi ketika dalam mode pengujian sampel (atau setelah uji selesai BAHAYA)
   // 2. Dalam 1 menit pertama uji sampel (samplePhase == 1), buzzer DILARANG berbunyi meskipun status BAHAYA
-  // 3. Pada fase 2 (setelah 1 menit) ATAU saat hasil terkunci BAHAYA, buzzer bunyi KONSTAN
+  // 3. Pada fase 2 (setelah 1 menit) ATAU saat hasil terkunci BAHAYA, buzzer berbunyi BEEP dengan tempo & ketukan konstan (250ms ON / 250ms OFF)
   bool alarmActive = false;
   if (sampleTestingActive && samplePhase == 2 && status == STATUS_BAHAYA) {
     alarmActive = true;
@@ -1738,11 +1738,20 @@ void updateActuators(SystemStatus status, unsigned long currentMillis) {
   }
 
   if (alarmActive) {
-    tone(PIN_BUZZER, 2000);  // Bunyi konstan tanda bahaya
-    buzzerState = true;
+    const unsigned long BEEP_INTERVAL_MS = 250UL;  // Ketukan konstan: 250ms ON, 250ms OFF (120 BPM)
+    if (currentMillis - previousMillisBuzzer >= BEEP_INTERVAL_MS) {
+      previousMillisBuzzer = currentMillis;
+      buzzerState = !buzzerState;
+      if (buzzerState) {
+        tone(PIN_BUZZER, 2000);
+      } else {
+        noTone(PIN_BUZZER);
+      }
+    }
   } else {
     noTone(PIN_BUZZER);
     buzzerState = false;
+    previousMillisBuzzer = currentMillis;
   }
 }
 
