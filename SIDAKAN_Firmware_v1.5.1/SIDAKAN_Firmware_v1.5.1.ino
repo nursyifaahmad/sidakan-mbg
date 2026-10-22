@@ -39,6 +39,7 @@
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
 #include <math.h>
+#include <Update.h>
 #include "SIDAKAN_Types.h"
 
 // ------------------------------------------------------------------------------
@@ -49,6 +50,99 @@ const char* AP_PASS = "ppginformatikaupi";
 
 WebServer server(80);
 WebSocketsServer webSocket(81);
+
+// ------------------------------------------------------------------------------
+// WEB OTA FIRMWARE UPDATE (PORT 80)
+// Akses via browser: http://192.168.4.1/update
+// ------------------------------------------------------------------------------
+const char* OTA_ADMIN_USER = "admin";
+const char* OTA_ADMIN_PASS = "admin";
+
+bool otaUploadAuthorized = false;
+bool otaUploadOK = false;
+bool otaUploadStarted = false;
+bool otaRestartPending = false;
+unsigned long otaRestartAt = 0;
+
+const char OTA_HTML[] PROGMEM = R"SIDAKANOTA(
+<!DOCTYPE html><html lang="id"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIDAKAN - Pembaruan Firmware</title>
+<style>body{font:16px Arial,sans-serif;background:#eef3fa;color:#182b42;margin:0;padding:22px}
+main{max-width:480px;margin:44px auto;background:white;border-radius:16px;padding:26px;box-shadow:0 5px 24px #18315320}
+h1{font-size:24px;margin:0 0 12px}p{line-height:1.5}input{max-width:100%;margin:12px 0}
+button{background:#183153;color:white;border:0;border-radius:8px;padding:12px 22px;cursor:pointer}
+small{color:#667}a{color:#183153}</style></head><body><main>
+<h1>SIDAKAN - Web OTA</h1><p>Unggah firmware aplikasi <b>.bin</b> dari Arduino IDE.</p>
+<form method="POST" action="/update" enctype="multipart/form-data">
+<input type="file" name="firmware" accept=".bin" required><br>
+<button type="submit">Unggah Firmware</button></form>
+<p><small>Perangkat akan restart setelah pembaruan berhasil. Jangan putus daya saat proses unggah. Pastikan firmware baru tetap memuat Web OTA.</small></p>
+<a href="/">Kembali ke dashboard</a></main></body></html>
+)SIDAKANOTA";
+
+bool otaCheckLogin() {
+  if (server.authenticate(OTA_ADMIN_USER, OTA_ADMIN_PASS)) return true;
+  server.requestAuthentication();
+  return false;
+}
+
+void otaHandleUpload() {
+  HTTPUpload &upload = server.upload();
+  switch (upload.status) {
+    case UPLOAD_FILE_START:
+      otaUploadAuthorized = server.authenticate(OTA_ADMIN_USER, OTA_ADMIN_PASS);
+      otaUploadOK = false;
+      otaUploadStarted = false;
+      if (!otaUploadAuthorized) return;
+      if (!upload.filename.endsWith(".bin")) {
+        Serial.println(F("[OTA] File harus berupa firmware .bin"));
+        return;
+      }
+      otaUploadStarted = Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH);
+      if (!otaUploadStarted) Update.printError(Serial);
+      else Serial.printf("[OTA] Menerima: %s\n", upload.filename.c_str());
+      break;
+    case UPLOAD_FILE_WRITE:
+      if (!otaUploadAuthorized || !otaUploadStarted || Update.hasError()) return;
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+      break;
+    case UPLOAD_FILE_END:
+      if (!otaUploadAuthorized || !otaUploadStarted || Update.hasError()) {
+        if (otaUploadStarted && !Update.isFinished()) Update.abort();
+        return;
+      }
+      otaUploadOK = Update.end(true);
+      if (otaUploadOK) Serial.printf("[OTA] Firmware diterima: %u bytes\n", (unsigned)upload.totalSize);
+      else Update.printError(Serial);
+      break;
+    case UPLOAD_FILE_ABORTED:
+      if (otaUploadStarted) Update.abort();
+      otaUploadOK = false;
+      Serial.println(F("[OTA] Upload dibatalkan"));
+      break;
+    default: break;
+  }
+}
+
+void otaHandleResult() {
+  if (!otaCheckLogin()) return;
+  if (otaUploadOK && !Update.hasError()) {
+    server.send(200, "text/html; charset=utf-8",
+      "<h2>Firmware SIDAKAN berhasil diperbarui.</h2><p>ESP32 akan restart. Silakan sambungkan kembali ke WiFi SIDAKAN-WIFI lalu buka dashboard.</p>");
+    otaRestartPending = true;
+    otaRestartAt = millis();
+  } else {
+    server.send(400, "text/plain; charset=utf-8",
+      "Pembaruan gagal atau file firmware tidak valid. Buka Serial Monitor untuk detail.");
+  }
+}
+
+void otaServiceRestart() {
+  if (otaRestartPending && millis() - otaRestartAt >= 2000UL) ESP.restart();
+}
 
 // ------------------------------------------------------------------------------
 // PENETAPAN PIN ESP32-S
@@ -2174,6 +2268,11 @@ void setup() {
   WiFi.softAP(AP_SSID, AP_PASS);
 
   server.on("/", handleRoot);
+  server.on("/update", HTTP_GET, []() {
+    if (!otaCheckLogin()) return;
+    server.send_P(200, "text/html; charset=utf-8", OTA_HTML);
+  });
+  server.on("/update", HTTP_POST, otaHandleResult, otaHandleUpload);
   server.begin();
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
@@ -2199,6 +2298,7 @@ void loop() {
 
   server.handleClient();
   webSocket.loop();
+  otaServiceRestart();
   handleButtonControl();
   handleTimerCountdown();
   handleBuzzerSequencer();
