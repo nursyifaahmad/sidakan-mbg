@@ -40,7 +40,7 @@ venv/
 env/
 
 # Dokumen Laporan, Proposal, Template, dan Script Builder Lokal
-# (Hanya Firmware v1.5.0 yang di-track di repository ini)
+# (Kecuali README.md di root)
 *.docx
 *.pdf
 *.png
@@ -48,12 +48,12 @@ env/
 *.txt
 *.html
 *.py
-to_do_sidakan.md
-SIDAKAN_Proposal_Final.md
-SIDAKAN_Panduan_Perakitan_dan_Pembuatan.md
+*.md
+!README.md
 AGENTS.md
 .agents/
+
+# Firmware Lama & Aset Dokumen
 SIDAKAN_Firmware/
-SIDAKAN_Firmware_v1.5.0/
 figures/
 figures_guide/
