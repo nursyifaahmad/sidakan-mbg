@@ -240,6 +240,12 @@ unsigned long sampleStartMillis = 0;
 bool sampleTestDone = false;
 char sampleTriggerReason[40] = "";
 int sampleDurationSec = 0;
+unsigned long sampleTestId = 0;
+int samplePhase = 0;  // 0=Idle, 1=Difusi uap 1 menit (alarm senyap), 2=Deteksi stabil
+
+// Kalibrasi acuan udara bersih (durasi 60 detik)
+bool isCalibrating = false;
+int calSecRemaining = 0;
 
 // Jendela kestabilan: toleransi <= 3 ADC selama 5 siklus berurutan (10 detik)
 const int STABILITY_WINDOW = 5;
@@ -259,7 +265,7 @@ float sampleLockedTemp = 0.0f;
 float sampleLockedHum = 0.0f;
 
 // Durasi & toleransi uji sampel
-const unsigned long SAMPLE_MIN_DELAY_MS   = 15000UL;   // Jeda 15s difusi sebelum evaluasi stabil
+const unsigned long SAMPLE_MIN_DELAY_MS   = 60000UL;   // 1 menit (60s) difusi uap makanan (tanpa alarm)
 const unsigned long SAMPLE_MAX_TIMEOUT_MS = 300000UL;  // 5 menit (300s) batas waktu maksimal
 const int ADC_STABILITY_TOLERANCE         = 3;         // Toleransi fluktuasi <= 3 ADC
 
@@ -498,10 +504,10 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:8px 0}
       </div>
 
       <div id="testActiveState" style="display:none;">
-        <div style="font-size:13px; font-weight:700; color:var(--blue);">UJI SAMPEL MAKANAN SEDANG BERLANGSUNG</div>
+        <div id="testPhaseTitle" style="font-size:13px; font-weight:700; color:var(--blue);">UJI SAMPEL MAKANAN SEDANG BERLANGSUNG</div>
         <div id="testTimer" class="timer-display">00:00 / 05:00</div>
         <div class="progress-pulse"><div class="progress-pulse-bar"></div></div>
-        <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">Mendeteksi kestabilan respons gas (toleransi &le; 3 ADC)...</div>
+        <div id="testPhaseDesc" style="font-size:12px; color:var(--muted); margin-bottom:12px;">Mendeteksi kestabilan respons gas (toleransi &le; 3 ADC)...</div>
         <button class="btn btn-cancel" onclick="stopTest()">⏹️ Batalkan Pengujian</button>
       </div>
 
@@ -629,7 +635,8 @@ let currentMode = localStorage.getItem('sidakan_mode') || 'simple';
 let testLogs = [];
 try { testLogs = JSON.parse(localStorage.getItem('sidakan_logs')) || []; } catch(e){ testLogs = []; }
 
-let lastTestDone = false;
+let lastLoggedTestId = 0;
+let isCurrentlyTesting = false;
 const N = 30, h3 = new Array(N).fill(0), h135 = new Array(N).fill(0);
 
 function byId(id){ return document.getElementById(id); }
@@ -673,14 +680,23 @@ function update(d){
     statusBox.className = 'card';
     byId('statusTitle').innerText = 'Alat Siaga';
     byId('statusDesc').innerText = 'Nyalakan alat untuk memulai pemantauan.';
+  } else if(d.calibrating){
+    statusBox.className = 'card'; statusBox.style.borderLeftColor = 'var(--blue)';
+    byId('statusTitle').innerText = 'Kalibrasi Titik Nol (' + (d.calRemain||0) + 's tersisa)';
+    byId('statusDesc').innerText = 'Mengunci nilai acuan udara bersih selama 1 menit penuh...';
   } else if(d.stabilizing){
     statusBox.className = 'card'; statusBox.style.borderLeftColor = 'var(--amber)';
-    byId('statusTitle').innerText = 'Sensor Sedang Stabilisasi';
-    byId('statusDesc').innerText = 'Menunggu sensor stabil sebelum sampel dinilai.';
+    byId('statusTitle').innerText = 'Stabilisasi Sensor (' + (d.stabRemain||0) + 's tersisa)';
+    byId('statusDesc').innerText = 'Pemanasan elemen sensor ~1 menit sebelum sampel dinilai.';
   } else if(!d.baselineValid){
     statusBox.className = 'card'; statusBox.style.borderLeftColor = 'var(--amber)';
     byId('statusTitle').innerText = 'Baseline Belum Valid';
     byId('statusDesc').innerText = 'Pembacaan dasar terlalu rendah/tinggi. Cek sensor lalu kalibrasi.';
+  } else if(d.testing){
+    statusBox.className = 'card'; statusBox.style.borderLeftColor = 'var(--blue)';
+    const phaseStr = (d.phase === 1 || d.testSec < 60) ? 'Tahap 1: Difusi Uap (' + (60 - d.testSec) + 's)' : 'Tahap 2: Deteksi Stabil (' + formatTimer(d.testSec) + ')';
+    byId('statusTitle').innerText = 'Uji Sampel Aktif · ' + phaseStr;
+    byId('statusDesc').innerText = (d.phase === 1 || d.testSec < 60) ? 'Sensor membaca fluktuasi awal (1 menit pertama). Alarm hening.' : 'Mencari kestabilan <= 3 ADC atau batas maksimal 5 menit.';
   } else if(d.status==='AMAN'){
     statusBox.className = 'card'; statusBox.style.borderLeftColor = 'var(--green)';
     byId('statusTitle').innerText = 'Kondisi Normal';
@@ -705,13 +721,20 @@ function update(d){
     byId('heroTitle').innerText = 'Alat Belum Dinyalakan';
     byId('heroDesc').innerText = 'Tekan tombol "Nyalakan" di kanan atas untuk memulai sistem SIDAKAN.';
     heroRecom.style.display = 'none';
+  } else if(d.calibrating){
+    hero.className = 'hero-card warn';
+    byId('heroTag').innerText = 'KALIBRASI UDARA BERSIH · ' + formatTimer(d.calRemain);
+    byId('heroTitle').innerText = 'Sedang Mengkalibrasi Sensor (' + (d.calRemain||0) + 's tersisa)';
+    byId('heroDesc').innerText = 'Sensor sedang mengukur acuan udara bersih selama 1 menit penuh. Harap jangan dekatkan makanan.';
+    heroRecom.style.display = 'block';
+    heroRecom.innerText = '⚖️ Kalibrasi memastikan titik nol sensor presisi. Harap tunggu hingga waktu habis.';
   } else if(d.stabilizing){
     hero.className = 'hero-card warn';
-    byId('heroTag').innerText = 'PEMANASAN SENSOR';
-    byId('heroTitle').innerText = 'Sensor Sedang Dipanaskan';
-    byId('heroDesc').innerText = 'Sensor memerlukan waktu pemanasan ~60 detik agar pembacaan gas akurat dan stabil.';
+    byId('heroTag').innerText = 'PEMANASAN SENSOR · ' + formatTimer(d.stabRemain);
+    byId('heroTitle').innerText = 'Sensor Sedang Dipanaskan (' + (d.stabRemain||0) + 's tersisa)';
+    byId('heroDesc').innerText = 'Sensor memerlukan waktu pemanasan 1 menit agar pembacaan gas akurat dan stabil.';
     heroRecom.style.display = 'block';
-    heroRecom.innerText = '💡 Harap tunggu sebentar sebelum mendekatkan makanan ke ruang sensor.';
+    heroRecom.innerText = '💡 Harap tunggu stabilisasi selesai (' + formatTimer(d.stabRemain) + ') sebelum menguji sampel.';
   } else if(!d.baselineValid){
     hero.className = 'hero-card warn';
     byId('heroTag').innerText = 'SENSOR BELUM SIAP';
@@ -721,11 +744,19 @@ function update(d){
     heroRecom.innerText = '⚠️ Pastikan sensor di udara bersih lalu tekan tombol "Kalibrasi".';
   } else if(d.testing){
     hero.className = 'hero-card testing';
-    byId('heroTag').innerText = 'UJI SAMPEL BERLANGSUNG';
-    byId('heroTitle').innerText = 'Menganalisis Aroma Sampel MBG...';
-    byId('heroDesc').innerText = 'Sistem sedang membaca fluktuasi gas makanan hingga kondisi stabil tercapai.';
-    heroRecom.style.display = 'block';
-    heroRecom.innerText = '🔍 Pertahankan ruang sensor tetap tertutup di atas piring makanan.';
+    if(d.phase === 1 || d.testSec < 60){
+      byId('heroTag').innerText = 'TAHAP 1/2: DIFUSI UAP · ' + formatTimer(d.testSec) + ' / 01:00';
+      byId('heroTitle').innerText = 'Membaca Fluktuasi Awal Sampel...';
+      byId('heroDesc').innerText = 'Sensor sedang beradaptasi dengan aroma makanan (1 menit pertama). Alarm hening.';
+      heroRecom.style.display = 'block';
+      heroRecom.innerText = '🔍 Pertahankan sungkup sensor tetap tertutup rapat di atas sampel makanan.';
+    } else {
+      byId('heroTag').innerText = 'TAHAP 2/2: DETEKSI KESTABILAN · ' + formatTimer(d.testSec) + ' / 05:00';
+      byId('heroTitle').innerText = 'Mendeteksi Kestabilan Gas Makanan...';
+      byId('heroDesc').innerText = 'Mencari kestabilan pembacaan (toleransi <= 3 ADC) untuk mengunci hasil akhir.';
+      heroRecom.style.display = 'block';
+      heroRecom.innerText = '⏳ Jika nilai stabil dalam 10 detik atau mencapai 5 menit, hasil otomatis terkunci.';
+    }
   } else if(d.testDone){
     const s = d.status;
     hero.className = 'hero-card ' + (s==='AMAN'?'safe':s==='WASPADA'?'warn':'danger');
@@ -768,7 +799,7 @@ function update(d){
   }
 
   // 3. KONTROL UJI SAMPEL
-  const readyForTest = power && !d.stabilizing && d.baselineValid;
+  const readyForTest = power && !d.stabilizing && !d.calibrating && d.baselineValid;
   const btnStart = byId('btnStartTest');
   if(btnStart) btnStart.disabled = !readyForTest;
 
@@ -780,26 +811,44 @@ function update(d){
     testIdle.style.display = 'none';
     testActive.style.display = 'block';
     testDone.style.display = 'none';
-    byId('testTimer').innerText = formatTimer(d.testSec) + ' / 05:00';
+    if(d.phase === 1 || d.testSec < 60){
+      byId('testPhaseTitle').innerText = '🔬 TAHAP 1/2: MEMBACA AROMA SAMPEL (DIFUSI UAP)';
+      byId('testTimer').innerText = formatTimer(d.testSec) + ' / 05:00 (Tahap 1: ' + (60 - d.testSec) + 's tersisa)';
+      byId('testPhaseDesc').innerText = 'Sensor membaca fluktuasi awal setelah sampel dimasukkan. Alarm senyap.';
+    } else {
+      byId('testPhaseTitle').innerText = '⚖️ TAHAP 2/2: DETEKSI KESTABILAN RESPON GAS';
+      byId('testTimer').innerText = formatTimer(d.testSec) + ' / 05:00';
+      byId('testPhaseDesc').innerText = 'Mencari kestabilan (toleransi <= 3 ADC selama 10s) atau batas maksimal 5 menit...';
+    }
   } else if(d.testDone){
     testIdle.style.display = 'none';
     testActive.style.display = 'none';
     testDone.style.display = 'block';
-    byId('testDoneInfo').innerText = 'Uji selesai dalam ' + d.testSec + ' detik (' + (d.testReason || 'Stabil') + ') · Indeks: ' + (d.lockIdx||d.combined).toFixed(1) + '%';
+    byId('testDoneInfo').innerText = 'Uji selesai dalam ' + formatTimer(d.testSec) + ' (' + (d.testReason || 'Stabil') + ') · Indeks: ' + (d.lockIdx||d.combined).toFixed(1) + '%';
   } else {
     testIdle.style.display = 'block';
     testActive.style.display = 'none';
     testDone.style.display = 'none';
-    byId('testIdleGuide').innerText = readyForTest 
-      ? 'Alat siap. Letakkan sensor di atas makanan lalu klik tombol di atas.'
-      : 'Nyalakan alat dan tunggu pemanasan sensor selesai untuk menguji sampel.';
+    if(d.calibrating){
+      byId('testIdleGuide').innerText = 'Sedang kalibrasi acuan udara bersih (' + (d.calRemain||0) + 's tersisa)... Harap tunggu.';
+    } else if(d.stabilizing){
+      byId('testIdleGuide').innerText = 'Sensor sedang dipanaskan (' + (d.stabRemain||0) + 's tersisa)... Harap tunggu hingga siap.';
+    } else if(readyForTest){
+      byId('testIdleGuide').innerText = 'Alat siap. Letakkan sensor di atas makanan lalu klik tombol di atas.';
+    } else {
+      byId('testIdleGuide').innerText = 'Nyalakan alat dan tunggu pemanasan sensor selesai untuk menguji sampel.';
+    }
   }
 
-  // LOGIKA RECORD LOG SAAT TESTDONE BARU AKTIF
-  if(d.testDone && !lastTestDone){
+  // LOGIKA RECORD LOG SAAT TESTDONE BARU AKTIF & TEST ID BARU
+  if(d.testing){
+    isCurrentlyTesting = true;
+  }
+  if(d.testDone && isCurrentlyTesting && d.testId && d.testId !== lastLoggedTestId){
+    lastLoggedTestId = d.testId;
+    isCurrentlyTesting = false;
     saveLogEntry(d);
   }
-  lastTestDone = d.testDone;
 
   // 4. METRIK DATA DETAIL
   byId('mq3Adc').innerText = d.mq3;
@@ -836,9 +885,23 @@ function calibrate(){
     if(ws && ws.readyState===1) ws.send('CALIBRATE');
   }
 }
-function startTest(){ if(ws && ws.readyState===1) ws.send('START_TEST'); }
-function stopTest(){ if(ws && ws.readyState===1) ws.send('STOP_TEST'); }
-function resetTestState(){ if(ws && ws.readyState===1) ws.send('CLEAR_READY'); }
+function startTest(){
+  if(!power){ alert('Nyalakan sistem terlebih dahulu.'); return; }
+  if(ws && ws.readyState===1){
+    isCurrentlyTesting = true;
+    ws.send('START_TEST');
+  } else {
+    alert('Koneksi WebSocket terputus. Muat ulang halaman.');
+  }
+}
+function stopTest(){
+  isCurrentlyTesting = false;
+  if(ws && ws.readyState===1) ws.send('STOP_TEST');
+}
+function resetTestState(){
+  isCurrentlyTesting = false;
+  if(ws && ws.readyState===1) ws.send('CLEAR_READY');
+}
 
 function toggleTheme(){
   const r = document.documentElement;
@@ -986,20 +1049,33 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     stopSampleTest("Dibatalkan pengguna");
   } else if (length == 11 && memcmp(payload, "CLEAR_READY", 11) == 0) {
     sampleTestDone = false;
+    samplePhase = 0;
+    noTone(PIN_BUZZER);
+    buzzerState = false;
     broadcastSensorData();
   }
 }
 
 // ------------------------------------------------------------------------------
 // >>> [PERBAIKAN 3/5: BUFFER STATIS ANTI-CRASH / ANTI HEAP FRAGMENTATION] <<<
-// Mengganti penyambungan String bertingkat (json += ...) dengan buffer char[384]
+// Mengganti penyambungan String bertingkat (json += ...) dengan buffer char[640]
 // dan snprintf(). Memori ESP32 tetap bersih dan tidak bocor, mencegah alat restart
 // sendiri setelah menyala beberapa jam.
 // ------------------------------------------------------------------------------
 void broadcastSensorData() {
-  char json[512];
+  char json[640];
+  unsigned long now = millis();
+  int stabRemain = 0;
+  if (systemPowerState && sensorIsStabilizing(now)) {
+    unsigned long elapsedStab = now - sensorStartMillis;
+    if (elapsedStab < RUNTIME_STABILIZATION_MS) {
+      stabRemain = (int)((RUNTIME_STABILIZATION_MS - elapsedStab) / 1000UL);
+    }
+  }
+
   snprintf(json, sizeof(json),
-    "{\"power\":%s,\"stabilizing\":%s,\"baselineValid\":%s,"
+    "{\"power\":%s,\"stabilizing\":%s,\"stabRemain\":%d,\"baselineValid\":%s,"
+    "\"calibrating\":%s,\"calRemain\":%d,"
     "\"mq3\":%d,\"mq135\":%d,"
     "\"baseMq3\":%d,\"baseMq135\":%d,"
     "\"riseMq3\":%.1f,\"riseMq135\":%.1f,"
@@ -1007,11 +1083,14 @@ void broadcastSensorData() {
     "\"combined\":%.1f,"
     "\"temp\":%.1f,\"hum\":%.1f,"
     "\"dhtValid\":%s,\"status\":\"%s\","
-    "\"testing\":%s,\"testSec\":%d,\"testDone\":%s,"
-    "\"testReason\":\"%s\",\"lockIdx\":%.1f}",
+    "\"testing\":%s,\"phase\":%d,\"testSec\":%d,\"testDone\":%s,"
+    "\"testReason\":\"%s\",\"lockIdx\":%.1f,\"testId\":%lu}",
     systemPowerState ? "true" : "false",
-    sensorIsStabilizing(millis()) ? "true" : "false",
+    sensorIsStabilizing(now) ? "true" : "false",
+    stabRemain,
     sensorBaselineValid ? "true" : "false",
+    isCalibrating ? "true" : "false",
+    calSecRemaining,
     averageMQ3, averageMQ135,
     baselineMQ3, baselineMQ135,
     mq3RisePct, mq135RisePct,
@@ -1021,10 +1100,12 @@ void broadcastSensorData() {
     dhtValid ? "true" : "false",
     statusText(currentStatus),
     sampleTestingActive ? "true" : "false",
+    samplePhase,
     sampleDurationSec,
     sampleTestDone ? "true" : "false",
     sampleTriggerReason,
-    sampleLockedCombined
+    sampleLockedCombined,
+    sampleTestId
   );
   webSocket.broadcastTXT(json);
 }
@@ -1397,6 +1478,13 @@ void toggleSystemPower(const char* source) {
   Serial.print(systemPowerState ? F("AKTIF via ") : F("STANDBY via "));
   Serial.println(source);
 
+  sampleTestingActive = false;
+  sampleTestDone = false;
+  sampleTestId = 0;
+  samplePhase = 0;
+  buzzerState = false;
+  noTone(PIN_BUZZER);
+
   if (systemPowerState) {
     sensorStartMillis = millis();
     previousMillisSensor = sensorStartMillis;
@@ -1409,7 +1497,6 @@ void toggleSystemPower(const char* source) {
     mq3Index = mq135Index = combinedGasIndex = 0.0f;
     currentStatus = STATUS_AMAN;
     resetStatusConfirmations();
-    noTone(PIN_BUZZER);
   } else {
     sensorStartMillis = 0;
     lastAutoBaselineAttempt = 0;
@@ -1418,19 +1505,26 @@ void toggleSystemPower(const char* source) {
     baselineMQ135 = 0;
     resetStatusConfirmations();
     currentStatus = STATUS_AMAN;
-    noTone(PIN_BUZZER);
     showStandbyOLED();
   }
   broadcastSensorData();
 }
 
 // ==============================================================================
-// KALIBRASI KEDUA SENSOR
+// KALIBRASI KEDUA SENSOR (60 DETIK PENUH)
 // ==============================================================================
 void runDualGasCalibration() {
-  Serial.println(F("[CAL] Memulai kalibrasi MQ-3 + MQ-135 selama 10 detik."));
+  Serial.println(F("[CAL] Memulai kalibrasi acuan MQ-3 + MQ-135 selama 60 detik."));
+  isCalibrating = true;
+  sampleTestingActive = false;
+  sampleTestDone = false;
+  sampleTestId = 0;
+  samplePhase = 0;
+  buzzerState = false;
+  noTone(PIN_BUZZER);
 
-  for (int sec = 10; sec > 0; sec--) {
+  for (int sec = 60; sec > 0; sec--) {
+    calSecRemaining = sec;
     if (oledReady) {
       display.clearDisplay();
       display.setTextColor(SSD1306_WHITE);
@@ -1442,6 +1536,7 @@ void runDualGasCalibration() {
       display.setTextSize(2); display.print(sec); display.print(F("s"));
       display.display();
     }
+    broadcastSensorData();
 
     unsigned long t0 = millis();
     while (millis() - t0 < 1000UL) {
@@ -1450,6 +1545,9 @@ void runDualGasCalibration() {
       delay(5);
     }
   }
+
+  isCalibrating = false;
+  calSecRemaining = 0;
 
   // ----------------------------------------------------------------------------
   // >>> [PERBAIKAN 5/5: SAMPLING KALIBRASI NON-BLOCKING (WEB TETAP ONLINE)] <<<
@@ -1601,34 +1699,50 @@ void showBaselineInvalidOLED() {
 // LED & BUZZER
 // ==============================================================================
 void updateActuators(SystemStatus status, unsigned long currentMillis) {
-  switch (status) {
+  // Tentukan status yang ditampilkan oleh lampu indikator LED
+  SystemStatus displayStatus = status;
+  if (sampleTestDone) {
+    displayStatus = sampleLockedStatus;
+  }
+
+  // Update LED Indikator
+  switch (displayStatus) {
     case STATUS_AMAN:
       digitalWrite(PIN_LED_HIJAU, HIGH);
       digitalWrite(PIN_LED_KUNING, LOW);
       digitalWrite(PIN_LED_MERAH, LOW);
-      noTone(PIN_BUZZER);
-      buzzerState = false;
       break;
 
     case STATUS_WASPADA:
       digitalWrite(PIN_LED_HIJAU, LOW);
       digitalWrite(PIN_LED_KUNING, HIGH);
       digitalWrite(PIN_LED_MERAH, LOW);
-      noTone(PIN_BUZZER);
-      buzzerState = false;
       break;
 
     case STATUS_BAHAYA:
       digitalWrite(PIN_LED_HIJAU, LOW);
       digitalWrite(PIN_LED_KUNING, LOW);
       digitalWrite(PIN_LED_MERAH, HIGH);
-      if (currentMillis - previousMillisBuzzer >= 250UL) {
-        previousMillisBuzzer = currentMillis;
-        buzzerState = !buzzerState;
-        if (buzzerState) tone(PIN_BUZZER, 2000);
-        else noTone(PIN_BUZZER);
-      }
       break;
+  }
+
+  // Aturan Alarm Buzzer:
+  // 1. Buzzer HANYA boleh berbunyi ketika dalam mode pengujian sampel (atau setelah uji selesai BAHAYA)
+  // 2. Dalam 1 menit pertama uji sampel (samplePhase == 1), buzzer DILARANG berbunyi meskipun status BAHAYA
+  // 3. Pada fase 2 (setelah 1 menit) ATAU saat hasil terkunci BAHAYA, buzzer bunyi KONSTAN
+  bool alarmActive = false;
+  if (sampleTestingActive && samplePhase == 2 && status == STATUS_BAHAYA) {
+    alarmActive = true;
+  } else if (sampleTestDone && sampleLockedStatus == STATUS_BAHAYA) {
+    alarmActive = true;
+  }
+
+  if (alarmActive) {
+    tone(PIN_BUZZER, 2000);  // Bunyi konstan tanda bahaya
+    buzzerState = true;
+  } else {
+    noTone(PIN_BUZZER);
+    buzzerState = false;
   }
 }
 
@@ -1677,11 +1791,16 @@ void startSampleTest() {
   sampleTestingActive = true;
   sampleTestDone = false;
   sampleStartMillis = millis();
+  sampleTestId = millis();
+  if (sampleTestId == 0) sampleTestId = 1;
+  samplePhase = 1;
   sampleDurationSec = 0;
   stabilityIndex = 0;
   stabilitySamplesCount = 0;
   strcpy(sampleTriggerReason, "");
-  Serial.println(F("[SAMPLE] >>> PENGUJIAN SAMPEL DIMULAI. Menunggu kestabilan / maks 5 menit..."));
+  buzzerState = false;
+  noTone(PIN_BUZZER);
+  Serial.println(F("[SAMPLE] >>> PENGUJIAN SAMPEL DIMULAI (Tahap 1: 1 menit difusi uap, alarm hening)..."));
   broadcastSensorData();
 }
 
@@ -1689,6 +1808,9 @@ void stopSampleTest(const char* reason) {
   if (!sampleTestingActive && !sampleTestDone) return;
   sampleTestingActive = false;
   sampleTestDone = false;
+  samplePhase = 0;
+  buzzerState = false;
+  noTone(PIN_BUZZER);
   Serial.print(F("[SAMPLE] Pengujian dibatalkan/direset: ")); Serial.println(reason);
   broadcastSensorData();
 }
@@ -1699,7 +1821,19 @@ void checkSampleStability(unsigned long currentMillis) {
   unsigned long elapsed = currentMillis - sampleStartMillis;
   sampleDurationSec = (int)(elapsed / 1000UL);
 
-  // Rekam sampel ke circular window stabilitas
+  // FASE 1: 1 MENIT PERTAMA (0 - 60 detik) DIFUSI UAP / BACA NAIK-TURUN ADC
+  // Pada fase ini sensor beradaptasi, alarm dilarang bersuara, dan pengujian belum boleh selesai.
+  if (elapsed < SAMPLE_MIN_DELAY_MS) {
+    samplePhase = 1;
+    stabilityIndex = 0;
+    stabilitySamplesCount = 0;
+    return;
+  }
+
+  // FASE 2: DETEKSI KESTABILAN (SETELAH 1 MENIT S/D 5 MENIT)
+  samplePhase = 2;
+
+  // Rekam sampel ke circular window stabilitas (5 sampel = 10 detik)
   stabilityMQ3[stabilityIndex] = averageMQ3;
   stabilityMQ135[stabilityIndex] = averageMQ135;
   stabilityIndex = (stabilityIndex + 1) % STABILITY_WINDOW;
@@ -1708,9 +1842,8 @@ void checkSampleStability(unsigned long currentMillis) {
   bool shouldFinish = false;
   const char* finishReason = "";
 
-  // 1. Kriteria Stabilitas: toleransi naik-turun <= 3 poin ADC
-  // Diberikan jeda awal minimal 15 detik untuk difusi uap makanan
-  if (elapsed >= SAMPLE_MIN_DELAY_MS && stabilitySamplesCount >= STABILITY_WINDOW) {
+  // 1. Kriteria Stabilitas: toleransi naik-turun <= 3 poin ADC bertahan minimal 10 detik (5 sampel)
+  if (stabilitySamplesCount >= STABILITY_WINDOW) {
     int min3 = stabilityMQ3[0], max3 = stabilityMQ3[0];
     int min135 = stabilityMQ135[0], max135 = stabilityMQ135[0];
 
@@ -1730,7 +1863,7 @@ void checkSampleStability(unsigned long currentMillis) {
     }
   }
 
-  // 2. Kriteria Batas Waktu Maksimum: 5 Menit (300 detik)
+  // 2. Kriteria Batas Waktu Maksimum: 5 Menit (300 detik, sudah termasuk 1 menit pertama)
   if (!shouldFinish && elapsed >= SAMPLE_MAX_TIMEOUT_MS) {
     shouldFinish = true;
     finishReason = "Batas Waktu Maksimal (5 Menit)";
@@ -1759,10 +1892,14 @@ void checkSampleStability(unsigned long currentMillis) {
     Serial.print(F("Indeks Gabungan: ")); Serial.print(sampleLockedCombined, 1); Serial.println(F("%"));
     Serial.println(F("===================================================="));
 
-    // Notifikasi suara bip pendek 2x (bip-bip) tanda uji selesai
-    tone(PIN_BUZZER, 2200, 120);
-    delay(150);
-    tone(PIN_BUZZER, 2200, 180);
+    // Notifikasi suara penanda rampung:
+    // Jika AMAN atau WASPADA: 1 nada beep pendek (200ms) lalu senyap
+    // Jika BAHAYA: updateActuators akan langsung membunyikan nada konstan
+    if (sampleLockedStatus != STATUS_BAHAYA) {
+      tone(PIN_BUZZER, 2200, 200);
+      delay(200);
+      noTone(PIN_BUZZER);
+    }
 
     broadcastSensorData();
   }
@@ -1785,12 +1922,18 @@ void updateOLEDSampleTesting(int sec) {
   display.print(s);
   display.print(F(" / 05:00"));
 
-  display.setCursor(4, 32); display.print(F("STATUS: "));
+  display.setCursor(4, 31); display.print(F("STATUS: "));
   display.print(statusText(currentStatus));
 
-  display.setCursor(4, 46); display.print(F("Indeks: "));
+  display.setCursor(4, 43); display.print(F("Indeks: "));
   display.print(combinedGasIndex, 0); display.print(F("%"));
-  display.setCursor(4, 56); display.print(F("Mendeteksi stabil..."));
+
+  display.setCursor(4, 55);
+  if (sec < 60) {
+    display.print(F("Tahap 1: Difusi uap"));
+  } else {
+    display.print(F("Tahap 2: Cek stabil"));
+  }
   display.display();
 }
 
