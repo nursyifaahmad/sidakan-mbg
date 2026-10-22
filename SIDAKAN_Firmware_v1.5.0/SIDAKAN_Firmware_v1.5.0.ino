@@ -39,6 +39,7 @@
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
 #include <math.h>
+#include "SIDAKAN_Types.h"
 
 // ------------------------------------------------------------------------------
 // KONFIGURASI ACCESS POINT (100% OFFLINE TANPA INTERNET)
@@ -102,41 +103,8 @@ const unsigned long RECOVERY_TIMEOUT_MS      = 900000UL; // Timeout pemulihan 15
 const float RECOVERY_TOLERANCE_PCT           = 0.10f;    // Toleransi desorpsi +/- 10%
 const int RECOVERY_CONSECUTIVE_TARGET        = 3;        // 3 titik pembacaan berturut-turut
 
-// ------------------------------------------------------------------------------
-// DEFINISI ENUMERASI STATE MACHINE & STATUS
-// ------------------------------------------------------------------------------
-enum SystemStatus {
-  STATUS_AMAN,
-  STATUS_WASPADA,
-  STATUS_BAHAYA
-};
-
-enum TestState {
-  STATE_WARMUP,      // 1. Pemanasan elemen pemanas SnO2 (60 detik)
-  STATE_IDLE,        // 2. Siaga (Titik nol terkunci, tombol uji aktif)
-  STATE_EXPOSURE,    // 3. Pengambilan aroma tertutup (300 detik)
-  STATE_EVALUATION,  // 4. Evaluasi kestabilan & perpanjangan dinamis (+30s s.d. 600s)
-  STATE_LOCKED,      // 5. Penguncian nilai akhir, vonis kelayakan & simpan log
-  STATE_RECOVERY     // 6. Penetralan sensor (pembersihan ruang uji hingga +/-10% titik nol)
-};
-
-enum PlateauStatus {
-  PLATEAU_BELUM_STABIL,
-  PLATEAU_MENINGKAT,
-  PLATEAU_MENURUN,
-  PLATEAU_STABIL
-};
-
-// ------------------------------------------------------------------------------
-// STRUKTUR DATA RING BUFFER JENDELA KESTABILAN (16 TITIK / 30 DETIK)
-// ------------------------------------------------------------------------------
-const int PLATEAU_WINDOW_SIZE = 16;
-
-struct RingBuffer16 {
-  int data[PLATEAU_WINDOW_SIZE];
-  int count;
-  int head;
-};
+// (Definisi SystemStatus, TestState, PlateauStatus, dan RingBuffer16
+//  berada di file header "SIDAKAN_Types.h" agar tidak bentrok dengan preprocessor Arduino IDE)
 
 RingBuffer16 ringMQ3;
 RingBuffer16 ringMQ135;
@@ -237,19 +205,8 @@ unsigned long lastCalibAction = 0;
 const unsigned long BUTTON_DEBOUNCE_MS = 80UL;
 
 // ------------------------------------------------------------------------------
-// PENGENDALI BUZZER NON-BLOCKING
+// PENGENDALI BUZZER NON-BLOCKING (BuzzerPattern di SIDAKAN_Types.h)
 // ------------------------------------------------------------------------------
-struct BuzzerPattern {
-  int freq;
-  unsigned long durationMs;
-  unsigned long pauseMs;
-  int repeatCount;
-  int currentCycle;
-  unsigned long stepStartMs;
-  bool isPlaying;
-  bool inSoundPhase;
-};
-
 BuzzerPattern buzzerSeq = {0, 0, 0, 0, 0, 0, false, false};
 
 void triggerVerdictBuzzer(SystemStatus status) {
