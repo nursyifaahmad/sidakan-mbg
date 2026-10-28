@@ -1535,7 +1535,7 @@ nav.tabs {
 </div>
 
 <script>
-let ws, power=false, prevPower=false, state="SIAGA", lastLockedData=null, testSaved=false;
+let ws, power=false, prevPower=false, state="SIAGA", lastLockedData=null, testSaved=false, lastLoggedTestId=null;
 const N=30, h3=new Array(N).fill(0), h135=new Array(N).fill(0);
 let base3=0, base135=0;
 
@@ -1544,7 +1544,10 @@ function byId(id){return document.getElementById(id)}
 function showTab(idx){
   document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',i===idx-1));
   document.querySelectorAll('.tab-pane').forEach((p,i)=>p.classList.toggle('active',i===idx-1));
-  if(idx===3) setTimeout(drawChart,50);
+  if(idx===3){
+    renderHistoryTable();
+    setTimeout(drawChart,50);
+  }
 }
 
 let simInterval = null, simData = null;
@@ -1572,6 +1575,9 @@ function initWS(){
 function cmd(text){
   if(text === 'TOGGLE_POWER' && !power){
     showTab(2);
+  }
+  if(text === 'START_TEST'){
+    testSaved = false;
   }
   if(ws && ws.readyState === 1){
     ws.send(text);
@@ -1662,12 +1668,13 @@ function startSimulation(){
       if(simData.testTimerSec <= 0 || t >= 25){
         simData.testState = 'LOCKED';
         simData.plateauStatus = 'STABIL';
+        simData.testId = Date.now();
         simData.lockedHoldSec = 0;
       }
     } else if(simData.testState === 'LOCKED'){
       if(simData.lockedHoldSec === undefined) simData.lockedHoldSec = 0;
       simData.lockedHoldSec++;
-      if(simData.lockedHoldSec >= 6){
+      if(simData.lockedHoldSec >= 10){
         simData.testState = 'RECOVERY';
         simData.recoverySec = 0;
         simData.lockedHoldSec = 0;
@@ -1721,6 +1728,7 @@ function executeSimCmd(text){
     simData.testTimerSec = 300;
     simData.testElapsedSec = 0;
     simData.lockedHoldSec = 0;
+    simData.testId = Date.now();
   } else if(text === 'CANCEL_TEST'){
     simData.testState = 'IDLE';
   } else if(text === 'BYPASS_RECOVERY'){
@@ -1973,14 +1981,17 @@ function update(d){
   byId('t2Hum').innerText=d.dhtValid?d.hum.toFixed(1)+' %RH':'--';
   byId('t2RecoveryStatus').innerText=d.recoveryReady?'Siap (Sensor Bersih)':'Penetralan Gas Berjalan';
 
-  if(rawState==='EXPOSURE'||rawState==='IDLE'||rawState==='CALIBRATING'){
+  if(rawState==='EXPOSURE'){
     testSaved=false;
   }
-  if(rawState==='LOCKED' && !testSaved){
-    if(!d.testId || d.testId !== lastLoggedTestId){
-      if(d.testId) lastLoggedTestId = d.testId;
-      saveTestRun(d);
-      testSaved=true;
+  if((rawState==='LOCKED'||rawState==='RECOVERY') && !testSaved){
+    if(d.testElapsedSec > 0 || d.testId){
+      if(!lastLoggedTestId || lastLoggedTestId !== d.testId){
+        if(d.testId) lastLoggedTestId = d.testId;
+        else lastLoggedTestId = Date.now();
+        saveTestRun(d);
+        testSaved = true;
+      }
     }
   }
 
@@ -2042,30 +2053,44 @@ window.addEventListener('resize',()=>{
 });
 
 function saveTestRun(d){
-  const plateauText=d.plateauStatus==='STABIL'?'STABIL':d.plateauStatus==='MENINGKAT'?'NAIK':d.plateauStatus==='MENURUN'?'TURUN':'BELUM STABIL';
-  const elapsed = d.testElapsedSec || 0;
-  const durText = elapsed > 0 ? (formatTime(elapsed) + ' (' + elapsed + 's)') : '300s';
-  const r3 = (typeof d.riseMq3 === 'number') ? d.riseMq3.toFixed(1) : (d.riseMq3 || '0.0');
-  const r135 = (typeof d.riseMq135 === 'number') ? d.riseMq135.toFixed(1) : (d.riseMq135 || '0.0');
-  lastLockedData={
-    id:'UJI-'+(d.testId ? d.testId.toString().slice(-4) : Date.now().toString().slice(-4)),
-    date:new Date().toLocaleString('id-ID'),
-    duration:durText,
-    mq3:d.mq3,baseMq3:d.baseMq3,riseMq3:r3,
-    mq135:d.mq135,baseMq135:d.baseMq135,riseMq135:r135,
-    plateau:plateauText,
-    verdict:d.status||'AMAN',
-    temp:d.temp?d.temp.toFixed(1):'27.0',
-    hum:d.hum?d.hum.toFixed(0):'60',
-    fluc3:d.mq3Fluc?d.mq3Fluc.toFixed(2):'0.50',
-    fluc135:d.mq135Fluc?d.mq135Fluc.toFixed(2):'0.40',
-    trend3:d.mq3Trend?d.mq3Trend.toFixed(2):'0.20',
-    trend135:d.mq135Trend?d.mq135Trend.toFixed(2):'0.15'
-  };
-  let list=getHistory();
-  list.unshift(lastLockedData);
-  if(list.length>50) list=list.slice(0,50);
-  try{ localStorage.setItem('sidakan_history',JSON.stringify(list)); }catch(err){ console.error(err); }
+  try {
+    const plateauText = (d.plateauStatus === 'STABIL') ? 'STABIL' : 
+                        (d.plateauStatus === 'MENINGKAT') ? 'NAIK' : 
+                        (d.plateauStatus === 'MENURUN') ? 'TURUN' : 'BELUM STABIL';
+    const elapsed = (typeof d.testElapsedSec === 'number' && d.testElapsedSec > 0) ? d.testElapsedSec : 0;
+    const durText = elapsed > 0 ? (formatTime(elapsed) + ' (' + elapsed + 's)') : '300s';
+    const r3 = (typeof d.riseMq3 === 'number') ? d.riseMq3.toFixed(1) : (d.riseMq3 != null ? String(d.riseMq3) : '0.0');
+    const r135 = (typeof d.riseMq135 === 'number') ? d.riseMq135.toFixed(1) : (d.riseMq135 != null ? String(d.riseMq135) : '0.0');
+    const idStr = 'UJI-' + (d.testId ? String(d.testId).slice(-4) : Date.now().toString().slice(-4));
+    
+    lastLockedData = {
+      id: idStr,
+      date: new Date().toLocaleString('id-ID'),
+      duration: durText,
+      mq3: (d.mq3 != null) ? d.mq3 : 0,
+      baseMq3: (d.baseMq3 != null) ? d.baseMq3 : 0,
+      riseMq3: r3,
+      mq135: (d.mq135 != null) ? d.mq135 : 0,
+      baseMq135: (d.baseMq135 != null) ? d.baseMq135 : 0,
+      riseMq135: r135,
+      plateau: plateauText,
+      verdict: d.status || 'AMAN',
+      temp: (typeof d.temp === 'number') ? d.temp.toFixed(1) : (d.temp || '27.0'),
+      hum: (typeof d.hum === 'number') ? d.hum.toFixed(0) : (d.hum || '60'),
+      fluc3: (typeof d.mq3Fluc === 'number') ? d.mq3Fluc.toFixed(2) : (d.mq3Fluc || '0.50'),
+      fluc135: (typeof d.mq135Fluc === 'number') ? d.mq135Fluc.toFixed(2) : (d.mq135Fluc || '0.40'),
+      trend3: (typeof d.mq3Trend === 'number') ? d.mq3Trend.toFixed(2) : (d.mq3Trend || '0.20'),
+      trend135: (typeof d.mq135Trend === 'number') ? d.mq135Trend.toFixed(2) : (d.mq135Trend || '0.15')
+    };
+    
+    let list = getHistory();
+    list.unshift(lastLockedData);
+    if(list.length > 50) list = list.slice(0, 50);
+    localStorage.setItem('sidakan_history', JSON.stringify(list));
+    console.log('[SIDAKAN] Data pengujian berhasil disimpan ke riwayat:', lastLockedData);
+  } catch(err) {
+    console.error('[SIDAKAN] Gagal menyimpan ke riwayat:', err);
+  }
   renderHistoryTable();
 }
 
@@ -2229,13 +2254,15 @@ void broadcastSensorData() {
     testElapsedSeconds,
     sampleTestId,
     testTriggerReason,
-    averageMQ3, averageMQ135,
+    (currentTestState == STATE_LOCKED ? lockedMQ3 : averageMQ3),
+    (currentTestState == STATE_LOCKED ? lockedMQ135 : averageMQ135),
     baselineMQ3, baselineMQ135,
-    mq3RisePct, mq135RisePct,
+    (currentTestState == STATE_LOCKED ? lockedRiseMQ3 : mq3RisePct),
+    (currentTestState == STATE_LOCKED ? lockedRiseMQ135 : mq135RisePct),
     mq3Index, mq135Index,
-    combinedGasIndex,
-    statusText(currentStatus),
-    plateauText(currentPlateauStatus),
+    (currentTestState == STATE_LOCKED ? lockedCombined : combinedGasIndex),
+    statusText(currentTestState == STATE_LOCKED ? lockedStatus : currentStatus),
+    plateauText(currentTestState == STATE_LOCKED ? lockedPlateau : currentPlateauStatus),
     mq3Fluc, mq135Fluc,
     mq3Trend, mq135Trend,
     recoveryReady ? "true" : "false",
@@ -2424,13 +2451,15 @@ void loop() {
       evaluatePlateau();
       evaluateStatus();
       checkSampleStability(now);
-      showExposureOLED();
+      if (currentTestState == STATE_EXPOSURE) {
+        showExposureOLED();
+      }
     }
 
-    // Logika Fase Terkunci (Locked Display selama 6 Detik, lalu masuk Penetralan)
+    // Logika Fase Terkunci (Locked Display selama 10 Detik, lalu masuk Penetralan)
     else if (currentTestState == STATE_LOCKED) {
       showLockedOLED();
-      if (now - stateEnterMillis >= 6000UL) {
+      if (now - stateEnterMillis >= 10000UL) {
         transitionToState(STATE_RECOVERY);
       }
     }
