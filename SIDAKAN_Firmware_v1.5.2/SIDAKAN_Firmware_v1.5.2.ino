@@ -240,6 +240,7 @@ unsigned long lastAutoBaselineAttempt = 0;
 const unsigned long AUTO_BASELINE_RETRY_MS = 10000UL;
 
 int testTimerSeconds = 0;
+unsigned long calibStartMillis = 0;
 int testElapsedSeconds = 0;
 int samplePhase = 0;
 unsigned long sampleTestId = 0;
@@ -1520,7 +1521,7 @@ nav.tabs {
               <th>Status Kelayakan</th>
             </tr>
           </thead>
-          <tbody id="logTableBody">
+          <tbody id="historyBody">
             <tr><td colspan="7" style="text-align:center;color:var(--muted)">Belum ada riwayat pengujian tersimpan.</td></tr>
           </tbody>
         </table>
@@ -1711,6 +1712,9 @@ function executeSimCmd(text){
     simData.riseMq135 = 0.0;
     simData.mq3 = simData.baseMq3;
     simData.mq135 = simData.baseMq135;
+  } else if(text === 'CALIBRATE'){
+    simData.testState = 'CALIBRATING';
+    simData.testTimerSec = 60;
   } else if(text === 'START_TEST'){
     testSaved = false;
     simData.testState = 'EXPOSURE';
@@ -1888,10 +1892,10 @@ function update(d){
     timerLabel.innerText='PEMANASAN (' + (d.testTimerSec!==undefined?d.testTimerSec:60) + ' DETIK)';
     pFill.style.width=Math.min(100,((60-(d.testTimerSec||0))/60)*100)+'%';
   } else if(rawState==='CALIBRATING'){
-    byId('heroTitle').innerText='Kalibrasi Titik Nol Udara Bersih';
-    byId('heroDesc').innerText='Sedang merekam nilai acuan udara bersih (60 detik)... Harap tunggu hingga selesai.';
+    byId('heroTitle').innerText='Kalibrasi Otomatis & Pemanasan Sensor (60 Detik)';
+    byId('heroDesc').innerText='Sensor sedang dipanaskan dan mengunci acuan udara bersih (60 detik)... Pastikan wadah sensor berada di udara segar.';
     timerNum.innerText=formatTime(d.testTimerSec!==undefined?d.testTimerSec:60);
-    timerLabel.innerText='KALIBRASI (' + (d.testTimerSec!==undefined?d.testTimerSec:60) + ' DETIK)';
+    timerLabel.innerText='KALIBRASI OTOMATIS (' + (d.testTimerSec!==undefined?d.testTimerSec:60) + ' DETIK)';
     pFill.style.width=Math.min(100,((60-(d.testTimerSec||0))/60)*100)+'%';
   } else if(rawState==='EXPOSURE'){
     const curPhase = d.phase || 1;
@@ -1972,10 +1976,12 @@ function update(d){
   if(rawState==='EXPOSURE'||rawState==='IDLE'||rawState==='CALIBRATING'){
     testSaved=false;
   }
-  if(rawState==='LOCKED' && !testSaved && d.testId && d.testId !== lastLoggedTestId){
-    lastLoggedTestId = d.testId;
-    saveTestRun(d);
-    testSaved=true;
+  if(rawState==='LOCKED' && !testSaved){
+    if(!d.testId || d.testId !== lastLoggedTestId){
+      if(d.testId) lastLoggedTestId = d.testId;
+      saveTestRun(d);
+      testSaved=true;
+    }
   }
 
   h3.push(d.mq3);h3.shift();
@@ -2039,12 +2045,14 @@ function saveTestRun(d){
   const plateauText=d.plateauStatus==='STABIL'?'STABIL':d.plateauStatus==='MENINGKAT'?'NAIK':d.plateauStatus==='MENURUN'?'TURUN':'BELUM STABIL';
   const elapsed = d.testElapsedSec || 0;
   const durText = elapsed > 0 ? (formatTime(elapsed) + ' (' + elapsed + 's)') : '300s';
+  const r3 = (typeof d.riseMq3 === 'number') ? d.riseMq3.toFixed(1) : (d.riseMq3 || '0.0');
+  const r135 = (typeof d.riseMq135 === 'number') ? d.riseMq135.toFixed(1) : (d.riseMq135 || '0.0');
   lastLockedData={
-    id:'UJI-'+Date.now().toString().slice(-4),
+    id:'UJI-'+(d.testId ? d.testId.toString().slice(-4) : Date.now().toString().slice(-4)),
     date:new Date().toLocaleString('id-ID'),
     duration:durText,
-    mq3:d.mq3,baseMq3:d.baseMq3,riseMq3:d.riseMq3.toFixed(1),
-    mq135:d.mq135,baseMq135:d.baseMq135,riseMq135:d.riseMq135.toFixed(1),
+    mq3:d.mq3,baseMq3:d.baseMq3,riseMq3:r3,
+    mq135:d.mq135,baseMq135:d.baseMq135,riseMq135:r135,
     plateau:plateauText,
     verdict:d.status||'AMAN',
     temp:d.temp?d.temp.toFixed(1):'27.0',
@@ -2057,7 +2065,7 @@ function saveTestRun(d){
   let list=getHistory();
   list.unshift(lastLockedData);
   if(list.length>50) list=list.slice(0,50);
-  localStorage.setItem('sidakan_history',JSON.stringify(list));
+  try{ localStorage.setItem('sidakan_history',JSON.stringify(list)); }catch(err){ console.error(err); }
   renderHistoryTable();
 }
 
@@ -2066,7 +2074,8 @@ function getHistory(){
 }
 
 function renderHistoryTable(){
-  const list=getHistory(),tbody=byId('historyBody');
+  const list=getHistory(),tbody=byId('historyBody') || byId('logTableBody');
+  if(!tbody) return;
   if(!list.length){
     tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--muted)">Belum ada data pengujian yang tercatat.</td></tr>';
     return;
@@ -2346,26 +2355,63 @@ void loop() {
 
     readAndFilterSensors();
 
-    // Logika Auto-Baseline Saat Pemanasan
-    if (currentTestState == STATE_WARMUP) {
-      if (now - sensorStartMillis >= RUNTIME_STABILIZATION_MS) {
-        if (dualBaselineValid(averageMQ3, averageMQ135)) {
-          baselineMQ3 = averageMQ3;
-          baselineMQ135 = averageMQ135;
+    // Logika Kalibrasi Otomatis & Pemanasan Sensor (60 Detik Non-Blocking)
+    if (currentTestState == STATE_CALIBRATING || currentTestState == STATE_WARMUP) {
+      unsigned long elapsedCal = now - calibStartMillis;
+      if (elapsedCal >= MANUAL_CALIBRATION_MS) {
+        // Pengambilan rata-rata 30 sampel
+        long sum3 = 0, sum135 = 0;
+        for (int i = 0; i < 30; i++) {
+          sum3 += analogRead(PIN_MQ3);
+          sum135 += analogRead(PIN_MQ135);
+          delay(2);
+        }
+        int cand3 = (int)(sum3 / 30);
+        int cand135 = (int)(sum135 / 30);
+
+        if (dualBaselineValid(cand3, cand135)) {
+          baselineMQ3 = cand3;
+          baselineMQ135 = cand135;
           sensorBaselineValid = true;
           resetGasFilter(baselineMQ3, baselineMQ135);
-          Serial.print(F("[WARMUP-DONE] Titik Nol VALID | MQ3=")); Serial.print(baselineMQ3);
-          Serial.print(F(" | MQ135=")); Serial.println(baselineMQ135);
+          calculateGasIndices();
+          evaluateStatus();
+          Serial.printf("[CAL-OK] Titik Nol VALID Terkunci | MQ3=%d, MQ135=%d Poin\n", baselineMQ3, baselineMQ135);
+          
+          if (oledReady) {
+            display.clearDisplay();
+            display.setTextColor(SSD1306_WHITE);
+            display.setTextSize(1);
+            display.setCursor(8, 6); display.print(F("KALIBRASI BERHASIL"));
+            display.drawLine(0, 18, 127, 18, SSD1306_WHITE);
+            display.setCursor(4, 26); display.print(F("MQ3  : ")); display.print(baselineMQ3); display.print(F(" Poin"));
+            display.setCursor(4, 40); display.print(F("MQ135: ")); display.print(baselineMQ135); display.print(F(" Poin"));
+            display.setCursor(4, 54); display.print(F("ALAT SIAP UJI"));
+            display.display();
+          }
+          delay(800);
           transitionToState(STATE_IDLE);
-        } else if (now - lastAutoBaselineAttempt >= AUTO_BASELINE_RETRY_MS) {
-          lastAutoBaselineAttempt = now;
-          Serial.println(F("[WARMUP-RETRY] Titik nol belum masuk rentang 80..4000. Cek pemanasan sensor."));
+        } else {
+          sensorBaselineValid = false;
+          Serial.printf("[CAL-RETRY] Titik nol belum masuk rentang 80..4000 (MQ3=%d, MQ135=%d). Cek pemanasan.\n", cand3, cand135);
           showBaselineInvalidOLED();
+          transitionToState(STATE_IDLE);
         }
       } else {
-        int secRemaining = (int)((RUNTIME_STABILIZATION_MS - (now - sensorStartMillis) + 999UL) / 1000UL);
+        int secRemaining = (int)((MANUAL_CALIBRATION_MS - elapsedCal + 999UL) / 1000UL);
         testTimerSeconds = secRemaining;
-        showWarmupOLED(secRemaining);
+        
+        if (oledReady) {
+          display.clearDisplay();
+          display.setTextColor(SSD1306_WHITE);
+          display.setTextSize(1);
+          display.setCursor(8, 4); display.print(F("KALIBRASI OTOMATIS"));
+          display.drawLine(0, 16, 127, 16, SSD1306_WHITE);
+          display.setCursor(12, 24); display.print(F("Udara Bersih Ruang"));
+          display.setCursor(14, 40); display.print(F("Sisa: "));
+          display.setTextSize(2); display.print(secRemaining); display.print(F("s"));
+          display.display();
+        }
       }
     }
 
@@ -2452,16 +2498,14 @@ void transitionToState(TestState newState) {
   Serial.print(F("[STATE] Transisi ke tahap: "));
   Serial.println(testStateText(newState));
 
-  if (newState == STATE_WARMUP) {
+  if (newState == STATE_WARMUP || newState == STATE_CALIBRATING) {
+    calibStartMillis = millis();
     testTimerSeconds = 60;
     testElapsedSeconds = 0;
     samplePhase = 0;
     recoveryReady = false;
-  } else if (newState == STATE_CALIBRATING) {
-    testTimerSeconds = 60;
-    testElapsedSeconds = 0;
-    samplePhase = 0;
-    recoveryReady = false;
+    sensorBaselineValid = false;
+    Serial.println(F("[CAL] Memulai Kalibrasi Otomatis & Pemanasan Sensor (60 Detik)..."));
   } else if (newState == STATE_IDLE) {
     testTimerSeconds = 0;
     testElapsedSeconds = 0;
@@ -2853,7 +2897,8 @@ void toggleSystemPower(const char* source) {
     mq3Index = mq135Index = combinedGasIndex = 0.0f;
     currentStatus = STATUS_AMAN;
     noTone(PIN_BUZZER);
-    transitionToState(STATE_WARMUP);
+    // Otomatisasi: Setiap menekan tombol Nyalakan, langsung jalankan Kalibrasi 60 Detik
+    transitionToState(STATE_CALIBRATING);
   } else {
     sensorStartMillis = 0;
     lastAutoBaselineAttempt = 0;
@@ -2871,96 +2916,12 @@ void toggleSystemPower(const char* source) {
 // KALIBRASI MANUAL TITIK NOL KEDUA SENSOR (NON-BLOCKING)
 // ==============================================================================
 void runDualGasCalibration() {
-  Serial.println(F("[CAL] Memulai kalibrasi manual dual-sensor (60 detik acuan udara bersih)..."));
-  transitionToState(STATE_CALIBRATING);
-
-  const unsigned long calStart = millis();
-  unsigned long lastOledDraw = 0;
-  unsigned long lastBroadcast = 0;
-
-  while (millis() - calStart < MANUAL_CALIBRATION_MS) {
-    unsigned long elapsed = millis() - calStart;
-    int secRemaining = (int)((MANUAL_CALIBRATION_MS - elapsed + 999UL) / 1000UL);
-    testTimerSeconds = secRemaining;
-
-    if (oledReady && millis() - lastOledDraw >= 400UL) {
-      lastOledDraw = millis();
-      display.clearDisplay();
-      display.setTextColor(SSD1306_WHITE);
-      display.setTextSize(1);
-      display.setCursor(10, 4); display.print(F("KALIBRASI TITIK NOL"));
-      display.drawLine(0, 16, 127, 16, SSD1306_WHITE);
-      display.setCursor(14, 24); display.print(F("Udara Bersih Ruang"));
-      display.setCursor(16, 40); display.print(F("Sisa: "));
-      display.setTextSize(2); display.print(secRemaining); display.print(F("s"));
-      display.display();
-    }
-
-    if (millis() - lastBroadcast >= 1000UL) {
-      lastBroadcast = millis();
-      broadcastSensorData();
-    }
-
-    server.handleClient();
-    webSocket.loop();
-    otaServiceRestart();
-    delay(10);
-  }
-
-  // Pengambilan rata-rata 30 sampel
-  long sum3 = 0, sum135 = 0;
-  const int samples = 30;
-  for (int i = 0; i < samples; i++) {
-    sum3 += analogRead(PIN_MQ3);
-    sum135 += analogRead(PIN_MQ135);
-    unsigned long t0 = millis();
-    while (millis() - t0 < 30UL) {
-      server.handleClient();
-      webSocket.loop();
-      otaServiceRestart();
-      delay(2);
-    }
-  }
-
-  const int candidateMQ3 = sum3 / samples;
-  const int candidateMQ135 = sum135 / samples;
-
-  if (!dualBaselineValid(candidateMQ3, candidateMQ135)) {
-    sensorBaselineValid = false;
-    Serial.printf("[CAL-ERROR] Titik nol tidak valid (80..4000) | MQ3=%d, MQ135=%d\n", candidateMQ3, candidateMQ135);
-    showBaselineInvalidOLED();
-    transitionToState(STATE_IDLE);
+  if (!systemPowerState) {
+    Serial.println(F("[CAL] Kalibrasi diabaikan: Alat belum aktif."));
     return;
   }
-
-  baselineMQ3 = candidateMQ3;
-  baselineMQ135 = candidateMQ135;
-  sensorBaselineValid = true;
-  resetGasFilter(baselineMQ3, baselineMQ135);
-  calculateGasIndices();
-  evaluateStatus();
-
-  Serial.printf("[CAL-OK] Titik Nol Baru: MQ3=%d, MQ135=%d Poin\n", baselineMQ3, baselineMQ135);
-
-  if (oledReady) {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(8, 8); display.print(F("KALIBRASI BERHASIL"));
-    display.drawLine(0, 20, 127, 20, SSD1306_WHITE);
-    display.setCursor(5, 28); display.print(F("MQ-3   : ")); display.print(baselineMQ3); display.print(F(" Poin"));
-    display.setCursor(5, 42); display.print(F("MQ-135 : ")); display.print(baselineMQ135); display.print(F(" Poin"));
-    display.display();
-  }
-
-  unsigned long tDisplay = millis();
-  while (millis() - tDisplay < 1000UL) {
-    server.handleClient();
-    webSocket.loop();
-    delay(5);
-  }
-
-  transitionToState(STATE_IDLE);
+  Serial.println(F("[CAL] Memulai kalibrasi manual dual-sensor (60 detik acuan udara bersih)..."));
+  transitionToState(STATE_CALIBRATING);
 }
 
 // ==============================================================================
